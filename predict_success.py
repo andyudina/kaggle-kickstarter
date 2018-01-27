@@ -14,10 +14,10 @@ logging.basicConfig(level=logging.DEBUG)
 
 
 ks_projects_2018_df = pd.read_csv('ks-projects-201801_cleaned_for_classification.csv')
-text_features_names = sparse.load_npz(
-    'ks-projects-201801_cleaned_for_classification-headers.npz')
+#text_features_names = sparse.load_npz(
+#    'ks-projects-201801_cleaned_for_classification-headers.npz')
 text_features = sparse.load_npz(
-    'ks-projects-201801_cleaned_for_classification.npz')
+    'ks-projects-201801_cleaned_for_classification_with_hashed_text.npz')
 
 def _is_nan(val):
     import math
@@ -435,7 +435,7 @@ def normalise_numeric_features_inplace(
 
 
 def merge_text_features_and_original_dataset(
-        tf_idf_metrics, text_features,
+        tf_idf_metrics,
         initial_df, columns_to_concat):
     """
     Merge to text features matrix and original dataset
@@ -447,15 +447,7 @@ def merge_text_features_and_original_dataset(
             sparse.csr_matrix(
                 initial_df[columns_to_concat].as_matrix())
         )).todense()
-
-    columns = np.hstack(
-        (
-            text_features,
-            columns_to_concat
-        ))
- 
-    return features, columns
-
+    return features
 
 def prepare_initial_dataset_for_classification_and_save_to_csv(df):
     """
@@ -481,47 +473,79 @@ def prepare_initial_dataset_for_classification_and_save_to_csv(df):
         index=False)
     return df
 
-def _save_columns_order_to_csv(final_columns):
+def _save_columns_order_to_npz(final_columns, file_name):
     """
     Helper to create npz file with text columns names
     """
     sparse_matrix = sparse.coo_matrix(final_columns)
     sparse.save_npz(
-        'ks-projects-201801_cleaned_for_classification-headers.npz',
+        '%s-headers.npz' % file_name,
         sparse_matrix)
 
-def _store_text_features_as_sparce_matrix(matrix):
+def _store_text_features_as_sparce_matrix(matrix, file_name):
     """
     Save text features as matrix
     """
     sparse.save_npz(
-        'ks-projects-201801_cleaned_for_classification.npz', 
+        '%s.npz' % file_name, 
         matrix)
 
-def generate_text_features_and_save_to_csv(df):
+
+def generate_text_features_via_tf_idf_and_save_to_npz(df):
     """
-    Add text features to dataset and save to csv
+    Add text features to dataset and save to npz
     """
     logging.info('Calculate tf idf features')
     tf_idf_metrics, text_features = \
         calculate_tf_idf_for_project_names(df.normalised_name)
 
 
-    logging.info('Save text data as sparce matrix')
-    _save_columns_order_to_csv(text_features)
-    _store_text_features_as_sparce_matrix(tf_idf_metrics)
+    logging.info('Save text data as sparse matrix')
+    FILE_NAME = 'ks-projects-201801_cleaned_for_classification'
+    _save_columns_order_to_csv(
+        text_features, FILE_NAME)
+    _store_text_features_as_sparce_matrix(
+        tf_idf_metrics, FILE_NAME)
+
+
+## Generate hashed text features
+
+
+def calculate_hashed_text_features(text_column):
+    """
+    Use HashigVectoriser to transform text column contect to
+    sparse matrix of features
+    """
+    from sklearn.feature_extraction.text import HashingVectorizer
+    vectorizer = HashingVectorizer()
+    sparse_text_features_matrix = vectorizer.fit_transform(
+        text_column.as_matrix())
+    return sparse_text_features_matrix
+
+
+def generate_hashed_text_features_and_save_to_npz(df):
+    """
+    Generate hashed text features and save to npz
+    """
+    logging.info('Get hashed text features')
+    sparsed_text_features_matrix = \
+        calculate_hashed_text_features(df.normalised_name)
+
+    logging.info('Save text data as sparse matrix')
+    FILE_NAME = 'ks-projects-201801_cleaned_for_classification_with_hashed_text'
+    _store_text_features_as_sparce_matrix(
+        sparsed_text_features_matrix, FILE_NAME)
 
 
 def get_dataset_for_classification(
-        tf_idf_metrics, text_features, df):
+        text_features, df):
     """
     Merge text features sparce array and other features dataset.
     Return sparse matrix with features, target column and column names
     """
-    # get list from coo_matrix of text features
-    text_features = list(text_features.data)
 
     # generate binarised features names
+    logging.info('Get binarised columns names')
     binarised_features = [
         column for column in df.columns.tolist()
         if any(
@@ -532,40 +556,32 @@ def get_dataset_for_classification(
     # conversion to int is needed for successful merge using sparse matrix
     df[TARGET_COLUMN] = df[TARGET_COLUMN].astype(int)
 
-    logging.info('Get binarised columns names')
-    binarised_features = [
-        column for column in df.columns.tolist()
-        if any(
-            feature in column 
-            for feature in CATEGORICAL_FEATURES)]
-  
     target_column = df[TARGET_COLUMN].as_matrix()
 
-    logging.info('Merge features and columns')
-    features, columns = merge_text_features_and_original_dataset(
-        tf_idf_metrics, text_features,
+    logging.info('Merge features')
+    features = merge_text_features_and_original_dataset(
+        text_features,
         df, binarised_features + \
         SIGNIFICANT_NUMERIC_FEATURES)
 
-    return features, columns, target_column
+    return features, target_column
 
-
-features, column_names, target_column = \
+features, target_column = \
     get_dataset_for_classification(
-        text_features, text_features_names, ks_projects_2018_df)
+        text_features, ks_projects_2018_df)
 
 
-# Teach SVM calssifier
-def teach_svm_classifier(X, y):
+# Train classifiers
+def train_svm_classifier(X, y):
     """
-    Teach SVC classifier and validate via cross validation
+    Train SVC classifier and validate via cross validation
     Return accuracy and classifier
     """
     import itertools
     from sklearn.svm import SVC
     from sklearn.model_selection import cross_val_score
 
-    def _teach_and_validate_svm_classifier(
+    def _train_and_validate_svm_classifier(
             C, gamma, X, y):
         clf = SVC(C=C, gamma=gamma)
         NUMBER_OF_CROSS_VAL_TRIES = 3
@@ -574,7 +590,7 @@ def teach_svm_classifier(X, y):
             clf.fit(X, y), \
             np.mean(scores)
             
-    logging.info('Teach classifier')
+    logging.info('Train classifier')
     C_s = [
         0.1, 1, 10, 100, 1000]
     gammas = [0.1, 0.01, 0.001, 0.0001, 0.00001]
@@ -584,7 +600,7 @@ def teach_svm_classifier(X, y):
     classification_results = []
     for C, gamma in c_and_gammas:
         logging.info('Test C and gamma:%d / %d' % (C, gamma))
-        classifier, accuracy = _teach_and_validate_svm_classifier(
+        classifier, accuracy = _train_and_validate_svm_classifier(
             C, gamma, X, y)
         classification_results.append(
             {
@@ -607,6 +623,112 @@ def teach_svm_classifier(X, y):
     # return best classifier
     return classification_results[0]['clf']
 
-teach_svm_classifier(
+
+def train_svg_classifier(X, y):
+    """
+    Train SVG classifier, leveraging incremental learning
+    """
+    def _batches(X_len):
+        """
+        Generate batches indexes ranges for initial dataset
+        """
+        BATCH_SIZE = 1000
+        for i in xrange(0, X_len, BATCH_SIZE):
+            yield i, min(i + BATCH_SIZE, X_len)
+
+    def _train_classifier_by_batches(X, y, clf):
+        """
+        Train classifier using partial fit
+        """
+        for batch_begin, batch_end in _batches(X.shape[0]):
+            logging.info('Get batch %d-%d' % (batch_begin, batch_end))
+            X_ = X[batch_begin: batch_end, :]
+            y_ = y[batch_begin: batch_end]
+            logging.info('Train batch: %d-%d' % (batch_begin, batch_end))
+            clf.partial_fit(
+                X_, y_, classes=classes)
+        return clf
+
+    def _extract_part_from_matrixes(
+            part, number_of_parts, X, y):
+        """
+        Helper to split matrix into two arrays:
+        X[0: part_begin) + X(part_end:], X[part]
+        """
+        part_size = int(len(X) / number_of_parts)
+        part_begin_index = part * part_size
+        part_end_index  = (part + 1) * part_size
+        if part == 0:
+            return \
+                X[part_end_index:, :], \
+                X[0: part_end_index, :], \
+                y[part_end_index: ], \
+                y[0: part_end_index]
+        if part == number_of_parts - 1:
+            return \
+                X[ : part_begin_index, :], \
+                X[part_begin_index : , :], \
+                y[ : part_begin_index], \
+                y[part_begin_index : ]       
+        return \
+            sparse.vstack((
+                sparse.csr_matrix(X[0: part_begin_index, :]),
+                sparse.csr_matrix(X[part_end_index:, :])
+            )).tocsr(), \
+            X[part_begin_index: part_end_index], \
+            np.hstack((
+                y[0: part_begin_index],
+                y[part_end_index:]
+            )), \
+            y[part_begin_index: part_end_index]
+
+    def _cross_validate_classifier_with_partial_fit(
+            X, y, clf):
+        """
+        Cross validate classifier trained in batches
+        """
+        from sklearn.base import clone
+        from sklearn.metrics import accuracy_score
+        NUMBER_OF_CROSS_VAL_TRIES = 5
+        accuracy_scores = []
+        for try_number in range(NUMBER_OF_CROSS_VAL_TRIES):
+            logging.info('Cross validation try %d' % (try_number + 1))
+            clf_ = clone(clf) # each time run with empty classifier
+            X_train, X_test, y_train, y_test = \
+                _extract_part_from_matrixes(
+                    try_number, 
+                    NUMBER_OF_CROSS_VAL_TRIES,
+                    X, y)
+            clf_ = _train_classifier_by_batches(X_train, y_train, clf_)
+            y_predicted = clf_.predict(X_test)
+            curr_accuracy_score = accuracy_score(y_test, y_predicted)
+            accuracy_scores.append(curr_accuracy_score)
+        return np.mean(accuracy_scores)
+
+    # TODO try tweacking SVG params: alpha etc.
+    from itertools import izip
+    from sklearn.linear_model import SGDClassifier
+    from sklearn.utils.class_weight import compute_class_weight
+
+    logging.info('Prepare classes info')
+    classes = np.unique(y)
+    class_weight = compute_class_weight(
+        'balanced', classes, y)
+
+    logging.info('Train classifier')
+    clf = SGDClassifier(
+        loss='hinge', # linear SVM
+        class_weight=dict(izip(classes, class_weight)))
+
+    accuracy_score = \
+        _cross_validate_classifier_with_partial_fit(X, y, clf)
+
+    return \
+        _train_classifier_by_batches(X, y, clf), \
+        accuracy_score
+
+
+clf, acc_score = train_svg_classifier(
     features,
     target_column)
+
